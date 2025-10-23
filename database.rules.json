@@ -1,0 +1,16 @@
+{
+  "rules": {
+    "drivers": {
+      "$driverUid": {
+        ".read": "auth != null && (auth.uid === $driverUid || root.child('students').child(auth.uid).child('assignedDriverId').val() === $driverUid)",
+        ".write": "auth != null && auth.uid === $driverUid"
+      }
+    },
+    "students": {
+      "$studentUid": {
+        ".read": "auth != null && auth.uid === $studentUid",
+        ".write": "auth != null && auth.uid === $studentUid"
+      }
+    }
+  }
+}

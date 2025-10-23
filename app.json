@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "College Transport Tracker",
+    "slug": "college-transport-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "ctt",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "backgroundColor": "#ffffff"
+    },
+    "updates": {
+      "fallbackToCacheTimeout": 0
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "config": {
+        "googleMapsApiKey": "AIzaSyDtITYPAh9gpx2tayZViPkjewUbWQ-Qe9g"
+      },
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "This app uses your location to share the bus/driver location in real-time.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app uses your location to share the bus/driver location in real-time."
+      }
+    },
+    "android": {
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "FOREGROUND_SERVICE"
+      ],
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyDtITYPAh9gpx2tayZViPkjewUbWQ-Qe9g"
+        }
+      },
+      "package": "com.anonymous.collegetransporttracker"
+    },
+    "web": {},
+    "extra": {
+      "eas": {
+        "projectId": "efb5e02b-1633-438a-8725-54a369624403"
+      }
+    }
+  }
+}
