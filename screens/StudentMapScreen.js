@@ -20,7 +20,7 @@ export default function StudentMapScreen({ onBack, driverEmail, busNumber }) {
   const STOP_GRACE_MS = 3 * 60 * 1000;
   const driverIdRef = useRef(null);
   const channelRef = useRef(null);
-  const GOOGLE_MAPS_API_KEY = 'AIzaSyBdoQlsILB1WJXmXuliZBbFA0jm0QBitF4';
+  const GOOGLE_MAPS_API_KEY = '';
   const lastRouteFetchAt = useRef(0);
   const lastUserInteractionAt = useRef(0);
   const AUTO_FIT_COOLDOWN_MS = 60000;
