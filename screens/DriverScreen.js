@@ -9,6 +9,7 @@ export default function DriverScreen({ onBack }) {
   const [isSharing, setIsSharing] = useState(false);
   const [lastLocation, setLastLocation] = useState(null);
   const watcherRef = useRef(null);
+  const autoStopRef = useRef(null);
   const [driverUid, setDriverUid] = useState(null);
   const [driverEmail, setDriverEmail] = useState(null);
   const [busInfo, setBusInfo] = useState(null); // { bus_number, ...optional fields }
@@ -41,8 +42,15 @@ export default function DriverScreen({ onBack }) {
         await loadAllocations(email, uid);
       }
     });
+    // Stop sharing when auth state becomes signed out
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_OUT') {
+        stopSharing();
+      }
+    });
     return () => {
       stopSharing();
+      sub?.subscription?.unsubscribe?.();
     };
   }, []);
 
@@ -177,6 +185,15 @@ export default function DriverScreen({ onBack }) {
       }
     );
 
+    // Start 3-hour auto stop timer
+    if (autoStopRef.current) {
+      clearTimeout(autoStopRef.current);
+      autoStopRef.current = null;
+    }
+    autoStopRef.current = setTimeout(() => {
+      stopSharing();
+    }, 3 * 60 * 60 * 1000);
+
     setIsSharing(true);
   };
 
@@ -185,6 +202,33 @@ export default function DriverScreen({ onBack }) {
       watcherRef.current.remove();
       watcherRef.current = null;
     }
+    if (autoStopRef.current) {
+      clearTimeout(autoStopRef.current);
+      autoStopRef.current = null;
+    }
+    // Mark as stale immediately, then attempt deletion (bounded) so students stop seeing quickly
+    try {
+      const uid = driverUid || (await supabase.auth.getUser()).data?.user?.id;
+      if (uid) {
+        // Upsert a tombstone with old timestamp to trigger stale handling client-side
+        const tombstone = supabase
+          .from('drivers_latest')
+          .upsert({ driver_id: uid, latitude: null, longitude: null, timestamp: '1970-01-01T00:00:00.000Z' }, { onConflict: 'driver_id' });
+        const tombstoneTimeout = new Promise((resolve) => setTimeout(resolve, 500));
+        await Promise.race([tombstone, tombstoneTimeout]);
+        // Then try delete, but don't block the UI
+        const deletion = supabase.from('drivers_latest').delete().eq('driver_id', uid);
+        const timeout = new Promise((resolve) => setTimeout(resolve, 800));
+        await Promise.race([deletion, timeout]);
+        // Broadcast a realtime 'stopped' event so students can react instantly
+        try {
+          const ch = supabase.channel(`drivers_latest_${uid}`);
+          await ch.subscribe();
+          await ch.send({ type: 'broadcast', event: 'stopped', payload: { at: new Date().toISOString() } });
+          supabase.removeChannel(ch);
+        } catch {}
+      }
+    } catch {}
     setIsSharing(false);
   };
 
@@ -272,8 +316,8 @@ export default function DriverScreen({ onBack }) {
         style={styles.watermark}
       />
       <View style={styles.header}>
-        <TouchableOpacity onPress={onBack}><Text style={styles.back}>Back</Text></TouchableOpacity>
-        <Text style={styles.title}>Driver</Text>
+        <TouchableOpacity onPress={() => { /* fire-and-forget stop for speed */ stopSharing(); onBack?.(); }}><Text style={styles.back}>Back</Text></TouchableOpacity>
+        <Text style={styles.title}>Welcome {busInfo?.driver_name || driverName || 'Driver'}</Text>
         <TouchableOpacity onPress={() => setProfileOpen(true)} style={styles.profileBtn}>
           <View style={styles.avatarSm}><Text style={styles.avatarTextSm}>{initialsFrom(busInfo?.driver_name || driverName, driverEmail)}</Text></View>
         </TouchableOpacity>
@@ -346,7 +390,7 @@ export default function DriverScreen({ onBack }) {
             </View>
             <View style={styles.modalRow}><Text style={styles.label}>Contact</Text><Text style={styles.value}>{busInfo?.driver_contact || driverContact || '—'}</Text></View>
             <View style={{ height: 12 }} />
-            <TouchableOpacity style={styles.secondaryBtn} onPress={async () => { await supabase.auth.signOut(); setProfileOpen(false); onBack?.(); }}>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => { setProfileOpen(false); onBack?.(); /* fire-and-forget for speed */ stopSharing(); supabase.auth.signOut(); }}>
               <Text style={styles.secondaryBtnText}>Logout</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#e5e7eb' }]} onPress={() => setProfileOpen(false)}>

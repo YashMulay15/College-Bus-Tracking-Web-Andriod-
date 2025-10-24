@@ -14,3 +14,11 @@ local.properties
 
 # Bundle artifacts
 *.jsbundle
+
+# Signing and Google config
+*.keystore
+*.jks
+app/*.keystore
+app/*.jks
+keystore.properties
+app/google-services.json

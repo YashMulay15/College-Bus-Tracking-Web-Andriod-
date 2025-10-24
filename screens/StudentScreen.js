@@ -196,7 +196,7 @@ export default function StudentScreen({ onBack, onOpenMap }) {
       <Image source={require('../assets/watermarklogo.png')} style={styles.watermark} />
       <View style={styles.header}>
         <TouchableOpacity onPress={onBack}><Text style={styles.back}>Back</Text></TouchableOpacity>
-        <Text style={styles.title}>Student</Text>
+        <Text style={styles.title}>Welcome {studentProfile?.student_name || 'Student'}</Text>
         <TouchableOpacity onPress={() => setProfileOpen(true)}>
           <View style={styles.avatarSm}><Text style={styles.avatarTextSm}>{initialsFrom(studentProfile?.student_name, studentProfile?.student_email)}</Text></View>
         </TouchableOpacity>

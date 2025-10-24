@@ -6,3 +6,48 @@ yarn-debug.log*
 yarn-error.log*
 package-lock.json
 web-build
+
+# Secrets and environment files
+.env
+.env.*
+*.env.local
+*.secret
+*.secrets
+.envrc
+
+# Firebase / Google configs (Android & iOS)
+android/app/google-services.json
+ios/**/GoogleService-Info.plist
+
+# Keystores and signing files
+*.keystore
+*.jks
+android/app/*.keystore
+android/app/*.jks
+android/keystore.properties
+
+# Supabase local config
+supabase/.env
+Application/AdminPanel/server/.env
+Application/AdminPanel/client/.env
+
+# IDE/editor
+.idea/
+.vscode/
+*.iml
+
+# Misc build outputs
+dist/
+build/
+coverage/
+
+# Admin Panel sensitive files (recursive)
+Application/AdminPanel/**/.env
+Application/AdminPanel/**/.env.*
+Application/AdminPanel/**/serviceAccount*.json
+Application/AdminPanel/**/credentials*.json
+Application/AdminPanel/**/firebase-*.json
+Application/AdminPanel/**/certs/
+Application/AdminPanel/**/keys/
+Application/AdminPanel/**/config.local.*
+Application/AdminPanel/**/secrets.*

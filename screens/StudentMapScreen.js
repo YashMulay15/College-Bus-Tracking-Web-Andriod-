@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { supabase } from '../src/supabaseClient';
@@ -14,10 +14,19 @@ export default function StudentMapScreen({ onBack, driverEmail, busNumber }) {
   const mapRef = useRef(null);
   const pollRef = useRef(null);
   const watcherRef = useRef(null);
+  const stopNotifiedRef = useRef(false);
+  const hadSeenLocationRef = useRef(false);
+  const STALE_MS = 15 * 1000;
+  const STOP_GRACE_MS = 3 * 60 * 1000;
+  const driverIdRef = useRef(null);
+  const channelRef = useRef(null);
   const GOOGLE_MAPS_API_KEY = 'AIzaSyBdoQlsILB1WJXmXuliZBbFA0jm0QBitF4';
   const lastRouteFetchAt = useRef(0);
   const lastUserInteractionAt = useRef(0);
-  const AUTO_FIT_COOLDOWN_MS = 60000; // 60s cooldown after user pans/zooms
+  const AUTO_FIT_COOLDOWN_MS = 60000;
+  const staleSinceRef = useRef(null);
+  const startSharingAtRef = useRef(null);
+  const MAX_SESSION_MS = 3 * 60 * 60 * 1000;
 
   useEffect(() => {
     let mounted = true;
@@ -38,12 +47,38 @@ export default function StudentMapScreen({ onBack, driverEmail, busNumber }) {
       mounted = false;
       stopPolling();
       if (watcherRef.current) { watcherRef.current.remove(); watcherRef.current = null; }
+      // Unsubscribe realtime channel on unmount
+      try {
+        if (channelRef.current) {
+          supabase.removeChannel(channelRef.current);
+          channelRef.current = null;
+        }
+      } catch {}
     };
+
+  const haversineKm = (a, b) => {
+    const toRad = (d) => (d * Math.PI) / 180;
+    const R = 6371;
+    const dLat = toRad(b.latitude - a.latitude);
+    const dLon = toRad(b.longitude - a.longitude);
+    const lat1 = toRad(a.latitude);
+    const lat2 = toRad(b.latitude);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  };
+
+  const formatEta = (mins) => {
+    if (mins < 1) return '<1 min';
+    if (mins < 60) return `${Math.round(mins)} mins`;
+    const h = Math.floor(mins / 60);
+    const m = Math.round(mins % 60);
+    return m ? `${h} hr ${m} min` : `${h} hr`;
+  };
   }, []);
 
   const startPolling = () => {
     if (pollRef.current) return;
-    pollRef.current = setInterval(fetchDriverLoc, 15000);
+    pollRef.current = setInterval(fetchDriverLoc, 2000);
   };
 
   const stopPolling = () => {
@@ -71,6 +106,68 @@ export default function StudentMapScreen({ onBack, driverEmail, busNumber }) {
     return points;
   };
 
+  const handleStopped = () => {
+    if (!stopNotifiedRef.current) {
+      stopNotifiedRef.current = true;
+      stopPolling();
+      setDriverLoc(null);
+      Alert.alert('Notice', 'Driver has stopped sharing location.', [
+        { text: 'OK', onPress: () => { onBack?.(); } }
+      ], { cancelable: false });
+    }
+  };
+
+  const markMaybeStopped = () => {
+    const now = Date.now();
+    if (staleSinceRef.current == null) {
+      staleSinceRef.current = now;
+    }
+  };
+
+  const ensureRealtimeSubscribed = (driverId) => {
+    if (!driverId) return;
+    // If already subscribed to a different driver, unsubscribe
+    if (channelRef.current && driverIdRef.current && driverIdRef.current !== driverId) {
+      try { supabase.removeChannel(channelRef.current); } catch {}
+      channelRef.current = null;
+    }
+    if (channelRef.current) return;
+    try {
+      const ch = supabase.channel(`drivers_latest_${driverId}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'drivers_latest', filter: `driver_id=eq.${driverId}` }, (payload) => {
+          const { eventType, new: newRow } = payload;
+          if (eventType === 'DELETE') {
+            handleStopped();
+          } else if (eventType === 'INSERT' || eventType === 'UPDATE') {
+            const t = newRow?.timestamp ? new Date(newRow.timestamp).getTime() : NaN;
+            const age = Date.now() - t;
+            if (startSharingAtRef.current && Date.now() - startSharingAtRef.current > MAX_SESSION_MS) {
+              handleStopped();
+              return;
+            }
+            if (!newRow?.latitude || !newRow?.longitude || isNaN(age) || age > STALE_MS) {
+              markMaybeStopped();
+            } else {
+              // Fresh update
+              const val = { latitude: newRow.latitude, longitude: newRow.longitude, timestamp: t };
+              setDriverLoc(val);
+              hadSeenLocationRef.current = true;
+              stopNotifiedRef.current = false;
+              staleSinceRef.current = null;
+              if (!startSharingAtRef.current) startSharingAtRef.current = Date.now();
+            }
+          }
+        })
+        .on('broadcast', { event: 'stopped' }, () => {
+          handleStopped();
+        })
+        .subscribe((status) => {
+          // no-op; could inspect status if needed
+        });
+      channelRef.current = ch;
+    } catch {}
+  };
+
   const fetchRoute = async (origin, destination) => {
     if (!GOOGLE_MAPS_API_KEY) return;
     const now = Date.now();
@@ -79,6 +176,17 @@ export default function StudentMapScreen({ onBack, driverEmail, busNumber }) {
     try {
       const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin.latitude},${origin.longitude}&destination=${destination.latitude},${destination.longitude}&mode=driving&departure_time=now&traffic_model=best_guess&key=${GOOGLE_MAPS_API_KEY}`;
       const res = await fetch(encodeURI(url));
+      const ct = res.headers?.get?.('content-type') || '';
+      if (!res.ok || !ct.includes('application/json')) {
+        const text = await res.text();
+        console.warn('Directions fetch error', { status: res.status, contentType: ct, snippet: text?.slice?.(0, 200) });
+        const km = haversineKm(origin, destination);
+        const mins = (km / 30) * 60;
+        setRouteCoords([origin, destination]);
+        setDistanceText(`${km.toFixed(1)} km`);
+        setDurationText(formatEta(mins));
+        return;
+      }
       const json = await res.json();
       const route = json?.routes?.[0];
       const leg = route?.legs?.[0];
@@ -91,44 +199,117 @@ export default function StudentMapScreen({ onBack, driverEmail, busNumber }) {
         if (mapRef.current && pts.length && canAutoFit) {
           mapRef.current.fitToCoordinates(pts, { edgePadding: { top: 100, right: 60, bottom: 100, left: 60 }, animated: true });
         }
+      } else {
+        const km = haversineKm(origin, destination);
+        const mins = (km / 30) * 60;
+        setRouteCoords([origin, destination]);
+        setDistanceText(`${km.toFixed(1)} km`);
+        setDurationText(formatEta(mins));
       }
-    } catch {}
+    } catch {
+      const km = haversineKm(origin, destination);
+      const mins = (km / 30) * 60;
+      setRouteCoords([origin, destination]);
+      setDistanceText(`${km.toFixed(1)} km`);
+      setDurationText(formatEta(mins));
+    }
   };
 
   const fetchDriverLoc = async () => {
-    if (!driverEmail) return;
+    if (!driverEmail && !busNumber) return;
     setLoading(true);
     try {
-      const emailKey = driverEmail.trim().toLowerCase();
-      const { data: adminRow, error: dErr } = await supabase
-        .from('drivers_admin')
-        .select('auth_user_id, driver_email')
-        .ilike('driver_email', emailKey)
-        .maybeSingle();
-      if (dErr) throw dErr;
-      let driverId = adminRow?.auth_user_id || null;
-      if (!driverId) {
-        const { data: cred, error: cErr } = await supabase
+      let driverId = null;
+      let emailKey = null;
+      if (driverEmail) emailKey = driverEmail.trim().toLowerCase();
+      // Attempt A: drivers_admin by driver_email
+      if (!driverId && emailKey) {
+        const { data, error } = await supabase
+          .from('drivers_admin')
+          .select('auth_user_id, driver_email, bus_number')
+          .ilike('driver_email', emailKey)
+          .maybeSingle();
+        if (!error && data?.auth_user_id) driverId = data.auth_user_id;
+      }
+      // Attempt B: credentials by email
+      if (!driverId && emailKey) {
+        const { data, error } = await supabase
           .from('credentials')
-          .select('user_id')
+          .select('user_id, email')
           .ilike('email', emailKey)
           .maybeSingle();
-        if (cErr) throw cErr;
-        driverId = cred?.user_id || null;
+        if (!error && data?.user_id) driverId = data.user_id;
       }
+      // Attempt C: bus_driver by email
+      if (!driverId && emailKey) {
+        const { data, error } = await supabase
+          .from('bus_driver')
+          .select('driver_id, driver_email, bus_number')
+          .ilike('driver_email', emailKey)
+          .maybeSingle();
+        if (!error && (data?.driver_id || data?.driver_email)) {
+          driverId = data?.driver_id || driverId;
+          emailKey = data?.driver_email?.toLowerCase?.() || emailKey;
+        }
+      }
+      // Attempt D: buses by email
+      if (!driverId && emailKey) {
+        const { data, error } = await supabase
+          .from('buses')
+          .select('driver_id, driver_email, bus_number')
+          .ilike('driver_email', emailKey)
+          .maybeSingle();
+        if (!error && (data?.driver_id || data?.driver_email)) {
+          driverId = data?.driver_id || driverId;
+          emailKey = data?.driver_email?.toLowerCase?.() || emailKey;
+        }
+      }
+      // Attempt E: drivers_admin by bus_number
       if (!driverId && busNumber) {
-        try {
-          const { data: byBus, error: bErr } = await supabase
-            .from('drivers_admin')
-            .select('auth_user_id, driver_email')
-            .eq('bus_number', busNumber)
-            .maybeSingle();
-          if (!bErr && byBus?.auth_user_id) {
-            driverId = byBus.auth_user_id;
-          }
-        } catch {}
+        const { data, error } = await supabase
+          .from('drivers_admin')
+          .select('auth_user_id, driver_email')
+          .eq('bus_number', busNumber)
+          .maybeSingle();
+        if (!error && (data?.auth_user_id || data?.driver_email)) {
+          driverId = data?.auth_user_id || driverId;
+          if (!emailKey) emailKey = data?.driver_email?.toLowerCase?.() || null;
+        }
       }
-      if (!driverId) return;
+      // Attempt F: bus_driver by bus_number
+      if (!driverId && busNumber) {
+        const { data, error } = await supabase
+          .from('bus_driver')
+          .select('driver_id, driver_email')
+          .eq('bus_number', busNumber)
+          .maybeSingle();
+        if (!error && (data?.driver_id || data?.driver_email)) {
+          driverId = data?.driver_id || driverId;
+          if (!emailKey) emailKey = data?.driver_email?.toLowerCase?.() || null;
+        }
+      }
+      // Attempt G: buses by bus_number
+      if (!driverId && busNumber) {
+        const { data, error } = await supabase
+          .from('buses')
+          .select('driver_id, driver_email')
+          .eq('bus_number', busNumber)
+          .maybeSingle();
+        if (!error && (data?.driver_id || data?.driver_email)) {
+          driverId = data?.driver_id || driverId;
+          if (!emailKey) emailKey = data?.driver_email?.toLowerCase?.() || null;
+        }
+      }
+      if (driverId && driverIdRef.current !== driverId) {
+        driverIdRef.current = driverId;
+        ensureRealtimeSubscribed(driverId);
+      }
+      if (!driverId) {
+        // No driver to resolve -> treat as stopped
+        console.warn('Could not resolve driverId from provided identifiers', { driverEmail, busNumber });
+        handleStopped();
+        return;
+      }
       const { data: loc, error: lErr } = await supabase
         .from('drivers_latest')
         .select('latitude, longitude, timestamp')
@@ -137,13 +318,33 @@ export default function StudentMapScreen({ onBack, driverEmail, busNumber }) {
       if (lErr) throw lErr;
       if (loc) {
         const val = { latitude: loc.latitude, longitude: loc.longitude, timestamp: new Date(loc.timestamp).getTime() };
-        setDriverLoc(val);
-        if (studentLoc) {
-          fetchRoute(studentLoc, val);
-        } else if (mapRef.current) {
-          mapRef.current.animateCamera({ center: { latitude: val.latitude, longitude: val.longitude }, zoom: 15 }, { duration: 600 });
+        const age = Date.now() - val.timestamp;
+        if (startSharingAtRef.current && Date.now() - startSharingAtRef.current > MAX_SESSION_MS) {
+          handleStopped();
+          return;
         }
+        if (isNaN(age) || age > STALE_MS) {
+          markMaybeStopped();
+        } else {
+          setDriverLoc(val);
+          hadSeenLocationRef.current = true;
+          stopNotifiedRef.current = false; // reset if it reappears timely
+          staleSinceRef.current = null;
+          if (!startSharingAtRef.current) startSharingAtRef.current = Date.now();
+          if (studentLoc) {
+            fetchRoute(studentLoc, val);
+          } else if (mapRef.current) {
+            mapRef.current.animateCamera({ center: { latitude: val.latitude, longitude: val.longitude }, zoom: 15 }, { duration: 600 });
+          }
+        }
+      } else {
+        // If driver location was previously visible and now missing, notify once and go back
+        markMaybeStopped();
       }
+    } catch (e) {
+      const msg = e?.message || String(e);
+      const short = msg.length > 300 ? msg.slice(0, 300) + '…' : msg;
+      console.warn('fetchDriverLoc error', short);
     } finally {
       setLoading(false);
     }
@@ -211,12 +412,28 @@ export default function StudentMapScreen({ onBack, driverEmail, busNumber }) {
           <Polyline coordinates={routeCoords} strokeColor="#2563eb" strokeWidth={5} />
         )}
       </MapView>
-      {(distanceText || durationText) && (
-        <View style={styles.infoBottomLeft}>
-          {distanceText ? <Text style={styles.infoText}>{`Distance: ${distanceText}`}</Text> : null}
-          {durationText ? <Text style={styles.infoText}>{`ETA: ${durationText}`}</Text> : null}
-        </View>
-      )}
+      {(() => {
+        const lastAge = driverLoc?.timestamp ? (Date.now() - driverLoc.timestamp) : null;
+        const formatAgo = (ms) => {
+          const s = Math.floor(ms / 1000);
+          if (s < 60) return `${s}s`;
+          const m = Math.floor(s / 60);
+          if (m < 60) return `${m}m`;
+          const h = Math.floor(m / 60);
+          return `${h}h`;
+        };
+        const showPanel = !!distanceText || !!durationText || lastAge != null;
+        if (!showPanel) return null;
+        return (
+          <View style={styles.infoBottomLeft}>
+            {distanceText ? <Text style={styles.infoText}>{`Distance: ${distanceText}`}</Text> : null}
+            {durationText ? <Text style={styles.infoText}>{`ETA: ${durationText}`}</Text> : null}
+            {lastAge != null ? (
+              <Text style={styles.infoText}>{`Last update: ${formatAgo(lastAge)} ago${lastAge > STALE_MS ? ' (stationary/no update)' : ''}`}</Text>
+            ) : null}
+          </View>
+        );
+      })()}
       {loading && (
         <View style={styles.loadingOverlay}>
           <ActivityIndicator size="large" color="#2563eb" />
